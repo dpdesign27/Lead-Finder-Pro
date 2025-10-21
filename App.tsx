@@ -156,15 +156,40 @@ const MapView: React.FC<MapViewProps> = ({ leads, userLocation, selectedBusiness
             const markerGroup = L.featureGroup();
             
             validLeads.forEach(lead => {
-                const popupContent = `
-                    <div style="font-family: 'Inter', sans-serif;">
-                        <div style="font-weight: 700; font-size: 1.1rem; margin-bottom: 4px;">${lead.name}</div>
-                        <div style="font-size: 0.9rem; color: #4B5563;">${lead.address}</div>
-                        ${lead.website ? `<a href="${lead.website}" target="_blank" rel="noopener noreferrer" style="font-size: 0.9rem; color: #2563EB; text-decoration: underline; margin-top: 4px; display: block;">Website</a>` : ''}
-                    </div>
-                `;
+                // SECURITY FIX: Create popup content programmatically to prevent XSS.
+                // Do not build HTML strings with untrusted data.
+                const popupNode = document.createElement('div');
+                popupNode.style.fontFamily = "'Inter', sans-serif";
 
-                const marker = L.marker([lead.latitude!, lead.longitude!]).bindPopup(popupContent);
+                const nameNode = document.createElement('div');
+                nameNode.style.fontWeight = '700';
+                nameNode.style.fontSize = '1.1rem';
+                nameNode.style.marginBottom = '4px';
+                nameNode.textContent = lead.name; // Use textContent to safely render text.
+
+                const addressNode = document.createElement('div');
+                addressNode.style.fontSize = '0.9rem';
+                addressNode.style.color = '#4B5563';
+                addressNode.textContent = lead.address; // Use textContent to safely render text.
+                
+                popupNode.appendChild(nameNode);
+                popupNode.appendChild(addressNode);
+
+                if (lead.website) {
+                    const websiteLink = document.createElement('a');
+                    websiteLink.href = lead.website;
+                    websiteLink.target = '_blank';
+                    websiteLink.rel = 'noopener noreferrer'; // Security for target=_blank
+                    websiteLink.textContent = 'Website';
+                    websiteLink.style.fontSize = '0.9rem';
+                    websiteLink.style.color = '#2563EB';
+                    websiteLink.style.textDecoration = 'underline';
+                    websiteLink.style.marginTop = '4px';
+                    websiteLink.style.display = 'block';
+                    popupNode.appendChild(websiteLink);
+                }
+
+                const marker = L.marker([lead.latitude!, lead.longitude!]).bindPopup(popupNode);
                 
                 // Add click listener to sync with the results list.
                 marker.on('click', () => {
@@ -366,12 +391,23 @@ const App: React.FC = () => {
         }
 
         const headers = ["Name", "Address", "Type", "Phone", "Rating", "Reviews", "Website", "Scraped Emails", "Scraped Phones", "Scraped Socials"];
-        // Helper to escape commas and quotes in CSV data.
+        
+        // SECURITY FIX: Sanitize data for CSV export to prevent Formula Injection.
         const escapeCsvCell = (cellData: any) => {
-            const stringData = String(cellData || '');
-            if (stringData.includes(',')) return `"${stringData.replace(/"/g, '""')}"`;
+            let stringData = String(cellData || '');
+
+            // Sanitize against CSV injection
+            if (['=', '+', '-', '@'].includes(stringData.charAt(0))) {
+                stringData = "'" + stringData;
+            }
+
+            // Escape quotes and wrap in quotes if it contains a comma.
+            if (stringData.includes(',')) {
+                return `"${stringData.replace(/"/g, '""')}"`;
+            }
             return stringData;
         };
+
         const csvRows = leads.map(lead => [
             escapeCsvCell(lead.name), escapeCsvCell(lead.address), escapeCsvCell(lead.type),
             escapeCsvCell(lead.phone), escapeCsvCell(lead.rating), escapeCsvCell(lead.reviews),
