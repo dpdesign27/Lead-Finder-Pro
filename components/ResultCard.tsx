@@ -1,19 +1,36 @@
+/**
+ * @file ResultCard.tsx
+ * This file contains the ResultCard component, which is responsible for displaying
+ * a single business lead's information, including scraped contact details.
+ * It also handles user interactions like scraping and selecting a card.
+ */
 
 import React, { useState } from 'react';
 import { Business, ScrapedData } from '../types';
 import { EmailIcon, PhoneIcon, SocialIcon, WebsiteIcon, StarIcon, CopyIcon, CheckIcon, LoadingSpinner, SocialMediaIcon } from './icons';
 
+/**
+ * Props for the ResultCard component.
+ */
 interface ResultCardProps {
-    business: Business;
-    onScrape: (businessId: string, websiteUrl: string) => void;
+    business: Business; // The business data to display.
+    onScrape: (businessId: string, websiteUrl: string) => void; // Callback function when the "Scrape" button is clicked.
+    isSelected: boolean; // True if this card is currently selected, used for highlighting.
+    onSelect: (businessId: string) => void; // Callback function when the card is clicked.
 }
 
+/**
+ * A small reusable component to display a single contact item (email, phone, etc.)
+ * with an icon, text, a link, and a copy-to-clipboard button.
+ */
 const ContactItem: React.FC<{ icon: React.ReactNode; text: string; link: string }> = ({ icon, text, link }) => {
+    // State to provide visual feedback when the copy button is clicked.
     const [copied, setCopied] = useState(false);
 
     const handleCopy = () => {
         navigator.clipboard.writeText(text);
         setCopied(true);
+        // Reset the "copied" state after 2 seconds.
         setTimeout(() => setCopied(false), 2000);
     };
 
@@ -30,7 +47,10 @@ const ContactItem: React.FC<{ icon: React.ReactNode; text: string; link: string 
     );
 };
 
-
+/**
+ * A component to display a section of scraped data (e.g., Emails, Phones).
+ * It renders a title and a list of ContactItem components.
+ */
 const ScrapedDataSection: React.FC<{ title: string; items: string[]; icon: React.ReactNode; linkPrefix?: string; isSocial?: boolean }> = ({ title, items, icon, linkPrefix = '', isSocial = false }) => (
     <div>
         <h4 className="flex items-center font-semibold text-gray-600 text-sm mb-2">
@@ -46,16 +66,34 @@ const ScrapedDataSection: React.FC<{ title: string; items: string[]; icon: React
     </div>
 );
 
-export const ResultCard: React.FC<ResultCardProps> = ({ business, onScrape }) => {
+/**
+ * The main component for displaying a business lead.
+ * It shows primary business info and conditionally displays scraped data or errors.
+ */
+export const ResultCard: React.FC<ResultCardProps> = ({ business, onScrape, isSelected, onSelect }) => {
     
+    // Handler for the "Scrape" button click.
     const handleScrapeClick = () => {
         if (business.website) {
             onScrape(business.id, business.website);
         }
     };
+
+    // Handler for clicking the card itself. This is used for map synchronization.
+    const handleCardClick = (e: React.MouseEvent<HTMLDivElement>) => {
+        // We prevent the select action if the user clicks on a button or link inside the card.
+        if ((e.target as HTMLElement).closest('button, a')) {
+            return;
+        }
+        onSelect(business.id);
+    };
     
     return (
-        <div className="bg-white border border-gray-200 rounded-lg shadow-sm p-5 mb-4">
+        <div 
+            onClick={handleCardClick}
+            // Dynamically apply styles based on whether the card is selected.
+            className={`bg-white border rounded-lg shadow-sm p-5 mb-4 transition-all duration-300 cursor-pointer ${isSelected ? 'ring-2 ring-indigo-500 border-transparent' : 'border-gray-200 hover:border-gray-300 hover:shadow-md'}`}
+        >
             <div className="flex justify-between items-start">
                 <div>
                     <h3 className="text-lg font-bold text-gray-800">{business.name}</h3>
@@ -66,6 +104,7 @@ export const ResultCard: React.FC<ResultCardProps> = ({ business, onScrape }) =>
                     onClick={handleScrapeClick} 
                     disabled={!business.website || business.isScraping}
                     className="flex items-center bg-green-500 text-white font-semibold px-4 py-2 rounded-md hover:bg-green-600 transition disabled:bg-gray-300 disabled:cursor-not-allowed">
+                     {/* Show a loading spinner while scraping */}
                      {business.isScraping ? <LoadingSpinner className="w-4 h-4 mr-2" /> : null}
                      {business.isScraping ? 'Scraping...' : 'Scrape'}
                 </button>
@@ -82,12 +121,14 @@ export const ResultCard: React.FC<ResultCardProps> = ({ business, onScrape }) =>
                 {business.website && <a href={business.website} target="_blank" rel="noopener noreferrer" className="flex items-center text-blue-600 hover:underline"><WebsiteIcon className="w-4 h-4 mr-1.5"/> Website</a>}
             </div>
 
+            {/* Conditionally render an error message if scraping failed */}
             {business.scrapeError && (
                 <div className="mt-4 p-3 bg-red-50 text-red-700 border border-red-200 rounded-md text-sm">
                     {business.scrapeError}
                 </div>
             )}
 
+            {/* Conditionally render the scraped data section if data exists */}
             {business.scrapedData && (
                 <div className="mt-4 pt-4 border-t border-gray-100 grid grid-cols-1 md:grid-cols-3 gap-6">
                     <ScrapedDataSection title="Emails" items={business.scrapedData.emails} icon={<EmailIcon className="w-5 h-5" />} linkPrefix="mailto:" />

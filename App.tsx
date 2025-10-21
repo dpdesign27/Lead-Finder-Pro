@@ -1,11 +1,25 @@
+/**
+ * @file App.tsx
+ * This is the root component of the Lead Finder Pro application.
+ * It manages the main application state, handles API calls, and orchestrates
+ * the interaction between all other components like the search bar, map, and results list.
+ */
+
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Business, LatLng, SearchHistoryItem } from './types';
-import { searchLeads, scrapeContacts } from './services/geminiService';
+import { searchLeads, scrapeContacts, geocodeAddresses } from './services/geminiService';
 import { ResultCard } from './components/ResultCard';
 import { LogoIcon, ExportIcon, SearchIcon, LoadingSpinner } from './components/icons';
 
+// Constant for pagination: number of results to show per "Load More" click.
 const RESULTS_PER_PAGE = 10;
+// Constant for the search bar's placeholder text.
+const PLACEHOLDER_TEXT = 'Get your next client. By Douglas P';
 
+/**
+ * The header component for the application.
+ * @param {{ onExport: () => void }} props - Props containing the export callback.
+ */
 const Header: React.FC<{ onExport: () => void }> = ({ onExport }) => (
     <header className="bg-white shadow-sm">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4 flex justify-between items-center">
@@ -14,7 +28,6 @@ const Header: React.FC<{ onExport: () => void }> = ({ onExport }) => (
                 <h1 className="text-2xl font-bold text-gray-800 ml-3">Lead Finder Pro</h1>
             </div>
             <div className="flex items-center space-x-6">
-                <div className="text-sm text-gray-600">Credits: <span className="font-semibold text-gray-800">48712</span></div>
                 <button 
                     onClick={onExport}
                     className="flex items-center bg-indigo-600 text-white font-semibold px-4 py-2 rounded-md hover:bg-indigo-700 transition">
@@ -26,16 +39,39 @@ const Header: React.FC<{ onExport: () => void }> = ({ onExport }) => (
     </header>
 );
 
+/**
+ * The search bar component with input field, filters, and submit button.
+ */
 const SearchBar: React.FC<{ 
     query: string;
     setQuery: (q: string) => void;
     onSubmit: () => void;
     isLoading: boolean;
 }> = ({ query, setQuery, onSubmit, isLoading }) => {
+    
+    // Determine if the placeholder is currently active for styling and logic.
+    const isPlaceholderActive = query === PLACEHOLDER_TEXT;
+
+    // Handles form submission to trigger a search.
     const handleSubmit = (e: React.FormEvent) => {
         e.preventDefault();
-        if (query.trim()) {
+        // Prevent submitting if the query is empty or is still the placeholder.
+        if (query.trim() && !isPlaceholderActive) {
             onSubmit();
+        }
+    };
+
+    // When the user clicks on the input, clear the placeholder text.
+    const handleFocus = () => {
+        if (isPlaceholderActive) {
+            setQuery('');
+        }
+    };
+
+    // When the user clicks away, if the input is empty, restore the placeholder.
+    const handleBlur = () => {
+        if (query.trim() === '') {
+            setQuery(PLACEHOLDER_TEXT);
         }
     };
 
@@ -46,16 +82,18 @@ const SearchBar: React.FC<{
                 <input
                     type="text"
                     value={query}
+                    onFocus={handleFocus}
+                    onBlur={handleBlur}
                     onChange={(e) => setQuery(e.target.value)}
-                    placeholder="e.g., plumbers in new york"
-                    className="flex-grow w-full px-4 py-2 border border-gray-300 rounded-md focus:ring-indigo-500 focus:border-indigo-500"
+                    // Conditionally apply text color: gray for placeholder, black for user input.
+                    className={`flex-grow w-full px-4 py-2 border border-gray-300 rounded-md focus:ring-indigo-500 focus:border-indigo-500 ${isPlaceholderActive ? 'text-gray-400' : 'text-gray-900'}`}
                 />
                 <select className="px-4 py-2 border border-gray-300 rounded-md bg-white focus:ring-indigo-500 focus:border-indigo-500">
                     <option>500 results</option>
                     <option>1000 results</option>
                     <option>2000 results</option>
                 </select>
-                <button type="submit" disabled={isLoading} className="flex items-center justify-center bg-blue-600 text-white font-semibold px-6 py-2 rounded-md hover:bg-blue-700 transition disabled:bg-blue-300 w-32">
+                <button type="submit" disabled={isLoading || isPlaceholderActive} className="flex items-center justify-center bg-blue-600 text-white font-semibold px-6 py-2 rounded-md hover:bg-blue-700 transition disabled:bg-blue-300 w-32">
                     {isLoading ? <LoadingSpinner className="w-5 h-5" /> : <><SearchIcon className="w-5 h-5 mr-2" /> Search</>}
                 </button>
             </form>
@@ -63,11 +101,26 @@ const SearchBar: React.FC<{
     );
 };
 
-const MapView: React.FC<{ leads: Business[], userLocation: LatLng | null }> = ({ leads, userLocation }) => {
-    const mapContainerRef = useRef<HTMLDivElement>(null);
-    const mapRef = useRef<any>(null);
-    const markersRef = useRef<any[]>([]);
+/**
+ * Props for the MapView component.
+ */
+interface MapViewProps {
+    leads: Business[];
+    userLocation: LatLng | null;
+    selectedBusinessId: string | null;
+    onMarkerClick: (id: string) => void;
+    isLoading: boolean;
+}
 
+/**
+ * Component to display leads on an interactive Leaflet map.
+ */
+const MapView: React.FC<MapViewProps> = ({ leads, userLocation, selectedBusinessId, onMarkerClick, isLoading }) => {
+    const mapContainerRef = useRef<HTMLDivElement>(null); // Ref to the map container div.
+    const mapRef = useRef<any>(null); // Ref to the Leaflet map instance.
+    const markersRef = useRef<Map<string, any>>(new Map()); // Ref to a map of Leaflet marker instances, keyed by business ID.
+
+    // Effect to initialize the map instance. Runs only once.
     useEffect(() => {
         if (mapContainerRef.current && !mapRef.current) {
             const L = (window as any).L;
@@ -75,9 +128,10 @@ const MapView: React.FC<{ leads: Business[], userLocation: LatLng | null }> = ({
                 console.error("Leaflet is not loaded");
                 return;
             }
+            // Set initial map coordinates to user's location or a default.
             const initialCoords: [number, number] = userLocation 
                 ? [userLocation.latitude, userLocation.longitude] 
-                : [34.0522, -118.2437]; 
+                : [34.0522, -118.2437]; // Default to Los Angeles
             
             const map = L.map(mapContainerRef.current).setView(initialCoords, 10);
             L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
@@ -87,12 +141,14 @@ const MapView: React.FC<{ leads: Business[], userLocation: LatLng | null }> = ({
         }
     }, [userLocation]);
 
+    // Effect to update map markers whenever the list of leads changes.
     useEffect(() => {
         const L = (window as any).L;
         if (!mapRef.current || !L) return;
 
+        // Clear existing markers from the map.
         markersRef.current.forEach(marker => marker.remove());
-        markersRef.current = [];
+        markersRef.current.clear();
 
         const validLeads = leads.filter(lead => lead.latitude != null && lead.longitude != null);
 
@@ -100,39 +156,108 @@ const MapView: React.FC<{ leads: Business[], userLocation: LatLng | null }> = ({
             const markerGroup = L.featureGroup();
             
             validLeads.forEach(lead => {
-                const marker = L.marker([lead.latitude!, lead.longitude!])
-                    .bindPopup(`<b>${lead.name}</b><br>${lead.address}`);
+                const popupContent = `
+                    <div style="font-family: 'Inter', sans-serif;">
+                        <div style="font-weight: 700; font-size: 1.1rem; margin-bottom: 4px;">${lead.name}</div>
+                        <div style="font-size: 0.9rem; color: #4B5563;">${lead.address}</div>
+                        ${lead.website ? `<a href="${lead.website}" target="_blank" rel="noopener noreferrer" style="font-size: 0.9rem; color: #2563EB; text-decoration: underline; margin-top: 4px; display: block;">Website</a>` : ''}
+                    </div>
+                `;
+
+                const marker = L.marker([lead.latitude!, lead.longitude!]).bindPopup(popupContent);
+                
+                // Add click listener to sync with the results list.
+                marker.on('click', () => {
+                    onMarkerClick(lead.id);
+                });
+
                 marker.addTo(markerGroup);
-                markersRef.current.push(marker);
+                markersRef.current.set(lead.id, marker); // Store marker instance.
             });
             
             markerGroup.addTo(mapRef.current);
+            // Adjust map view to fit all markers.
             if (markerGroup.getBounds().isValid()) {
                 mapRef.current.fitBounds(markerGroup.getBounds().pad(0.1));
             }
         } else if (userLocation) {
+            // If no leads, center on user's location.
             mapRef.current.setView([userLocation.latitude, userLocation.longitude], 10);
         }
 
-    }, [leads, userLocation]);
+    }, [leads, userLocation, onMarkerClick]);
+
+    // Effect to handle marker highlighting when a business is selected from the list.
+    useEffect(() => {
+        const L = (window as any).L;
+        if (!L || !mapRef.current) return;
+        
+        // Define default and highlighted marker icons.
+        const defaultIcon = new L.Icon.Default();
+        const highlightedIcon = new L.Icon.Default({
+             iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-violet.png',
+             shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/0.7.7/images/marker-shadow.png',
+             iconSize: [25, 41],
+             iconAnchor: [12, 41],
+             popupAnchor: [1, -34],
+             shadowSize: [41, 41]
+        });
+
+        // Reset all markers to default icon, then set the selected one to highlighted.
+        markersRef.current.forEach((marker, id) => {
+            if (id === selectedBusinessId) {
+                marker.setIcon(highlightedIcon);
+                if(marker.setZIndexOffset) marker.setZIndexOffset(1000); // Bring to front
+            } else {
+                marker.setIcon(defaultIcon);
+                 if(marker.setZIndexOffset) marker.setZIndexOffset(0);
+            }
+        });
+
+        // If a business is selected, pan the map to it and open its popup.
+        if (selectedBusinessId) {
+            const selectedMarker = markersRef.current.get(selectedBusinessId);
+            if (selectedMarker) {
+                mapRef.current.flyTo(selectedMarker.getLatLng(), 15, { duration: 0.5 });
+                selectedMarker.openPopup();
+            }
+        }
+
+    }, [selectedBusinessId]);
 
     return (
-         <div ref={mapContainerRef} className="bg-gray-200 h-96 rounded-md" />
+        <div className="relative h-96 rounded-md overflow-hidden">
+             <div ref={mapContainerRef} className="bg-gray-200 h-full w-full" />
+             {/* Show a message if there are no results to display on the map */}
+             {!isLoading && leads.length === 0 && (
+                 <div className="absolute inset-0 flex items-center justify-center bg-gray-200 bg-opacity-80">
+                    <p className="text-gray-600 font-semibold text-lg">No results to show on the map</p>
+                </div>
+             )}
+        </div>
     );
 };
 
+/**
+ * The main application component.
+ */
 const App: React.FC = () => {
-    const [leads, setLeads] = useState<Business[]>([]);
-    const [isLoading, setIsLoading] = useState(false);
-    const [error, setError] = useState<string | null>(null);
-    const [activeTab, setActiveTab] = useState('current');
-    const [userLocation, setUserLocation] = useState<LatLng | null>(null);
-    const [searchQuery, setSearchQuery] = useState('dietitian las vegas');
-    const [searchHistory, setSearchHistory] = useState<SearchHistoryItem[]>([]);
-    const [isScrapingAll, setIsScrapingAll] = useState(false);
-    const [visibleLeadsCount, setVisibleLeadsCount] = useState(RESULTS_PER_PAGE);
+    // --- STATE MANAGEMENT ---
+    const [leads, setLeads] = useState<Business[]>([]); // Holds the list of business results.
+    const [isLoading, setIsLoading] = useState(false); // Tracks loading state for search.
+    const [error, setError] = useState<string | null>(null); // Stores any error messages.
+    const [activeTab, setActiveTab] = useState('current'); // Manages which tab is active ('current' or 'history').
+    const [userLocation, setUserLocation] = useState<LatLng | null>(null); // User's geolocation.
+    const [searchQuery, setSearchQuery] = useState(PLACEHOLDER_TEXT); // The current value of the search input.
+    const [searchHistory, setSearchHistory] = useState<SearchHistoryItem[]>([]); // List of past searches.
+    const [isScrapingAll, setIsScrapingAll] = useState(false); // Tracks loading state for "Scrape All".
+    const [visibleLeadsCount, setVisibleLeadsCount] = useState(RESULTS_PER_PAGE); // For "Load More" pagination.
+    const [selectedBusinessId, setSelectedBusinessId] = useState<string | null>(null); // ID of the business selected in the list/map.
 
+    // --- EFFECTS ---
+    // Effect runs on initial component mount.
     useEffect(() => {
+        // Load search history from localStorage.
         try {
             const storedHistory = localStorage.getItem('leadFinderHistory');
             if (storedHistory) {
@@ -143,6 +268,7 @@ const App: React.FC = () => {
             setSearchHistory([]);
         }
 
+        // Get user's current geolocation.
         navigator.geolocation.getCurrentPosition(
             (position) => {
                 setUserLocation({
@@ -153,29 +279,53 @@ const App: React.FC = () => {
             (err) => {
                 console.warn(`ERROR(${err.code}): ${err.message}`);
             },
-            {
-                timeout: 10000,
-                maximumAge: 0,
-            }
+            { timeout: 10000, maximumAge: 0 }
         );
     }, []);
     
+    // --- HELPER FUNCTIONS ---
+    // Updates search history state and persists it to localStorage.
     const updateSearchHistory = (newHistory: SearchHistoryItem[]) => {
         setSearchHistory(newHistory);
         localStorage.setItem('leadFinderHistory', JSON.stringify(newHistory));
     };
 
+    // --- CORE LOGIC HANDLERS ---
+    // Handles the main search functionality.
     const handleSearch = useCallback(async (query: string) => {
-        if (!query) return;
+        if (!query || query === PLACEHOLDER_TEXT) return;
         setIsLoading(true);
         setError(null);
         setLeads([]);
+        setSelectedBusinessId(null);
         setVisibleLeadsCount(RESULTS_PER_PAGE);
         try {
-            const results = await searchLeads(query, userLocation);
-            setLeads(results);
+            // Step 1: Get initial search results.
+            const initialResults = await searchLeads(query, userLocation);
             
-            const newHistoryItem: SearchHistoryItem = { id: `${Date.now()}`, query, timestamp: Date.now(), resultCount: results.length };
+            // Step 2: Identify leads that need geocoding.
+            const toGeocode = initialResults
+                .filter(lead => lead.address && (lead.latitude == null || lead.longitude == null))
+                .map(lead => ({ id: lead.id, address: lead.address }));
+
+            // Step 3: Batch geocode addresses if necessary.
+            if (toGeocode.length > 0) {
+                const coordinatesMap = await geocodeAddresses(toGeocode);
+                // Step 4: Merge coordinates back into the results.
+                const finalResults = initialResults.map(lead => {
+                    if (coordinatesMap.has(lead.id)) {
+                        const coords = coordinatesMap.get(lead.id)!;
+                        return { ...lead, latitude: coords.latitude, longitude: coords.longitude };
+                    }
+                    return lead;
+                });
+                setLeads(finalResults);
+            } else {
+                setLeads(initialResults);
+            }
+            
+            // Step 5: Update search history.
+            const newHistoryItem: SearchHistoryItem = { id: `${Date.now()}`, query, timestamp: Date.now(), resultCount: initialResults.length };
             const updatedHistory = [newHistoryItem, ...searchHistory.filter(h => h.query !== query)].slice(0, 20);
             updateSearchHistory(updatedHistory);
 
@@ -186,24 +336,29 @@ const App: React.FC = () => {
         }
     }, [userLocation, searchHistory]);
 
+    // Handles scraping a single business's website.
     const handleScrape = useCallback(async (businessId: string, websiteUrl: string) => {
+        // Update UI to show scraping is in progress for this specific card.
         setLeads(prevLeads => prevLeads.map(lead =>
             lead.id === businessId ? { ...lead, isScraping: true, scrapeError: undefined } : lead
         ));
 
         try {
             const scrapedData = await scrapeContacts(websiteUrl);
+            // Update the lead with the successfully scraped data.
             setLeads(prevLeads => prevLeads.map(lead =>
                 lead.id === businessId ? { ...lead, isScraping: false, scrapedData } : lead
             ));
         } catch (err) {
             const errorMessage = err instanceof Error ? err.message : 'Scraping failed.';
+            // Update the lead with an error message if scraping fails.
             setLeads(prevLeads => prevLeads.map(lead =>
                 lead.id === businessId ? { ...lead, isScraping: false, scrapeError: errorMessage } : lead
             ));
         }
     }, []);
     
+    // Handles exporting all current leads to a CSV file.
     const handleExportAll = useCallback(() => {
         if (leads.length === 0) {
             alert("No leads to export.");
@@ -211,6 +366,7 @@ const App: React.FC = () => {
         }
 
         const headers = ["Name", "Address", "Type", "Phone", "Rating", "Reviews", "Website", "Scraped Emails", "Scraped Phones", "Scraped Socials"];
+        // Helper to escape commas and quotes in CSV data.
         const escapeCsvCell = (cellData: any) => {
             const stringData = String(cellData || '');
             if (stringData.includes(',')) return `"${stringData.replace(/"/g, '""')}"`;
@@ -222,6 +378,7 @@ const App: React.FC = () => {
             escapeCsvCell(lead.website), escapeCsvCell(lead.scrapedData?.emails.join('; ') || ''),
             escapeCsvCell(lead.scrapedData?.phones.join('; ') || ''), escapeCsvCell(lead.scrapedData?.socials.join('; ') || '')
         ].join(','));
+        
         const csvContent = [headers.join(','), ...csvRows].join('\n');
         const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
         const link = document.createElement("a");
@@ -234,9 +391,11 @@ const App: React.FC = () => {
         URL.revokeObjectURL(url);
     }, [leads]);
     
+    // Handles the "Scrape All" button click, iterating through leads.
     const handleScrapeAll = async () => {
         setIsScrapingAll(true);
         for (const lead of leads) {
+            // Only scrape if it has a website and hasn't been scraped yet.
             if (lead.website && !lead.scrapedData && !lead.scrapeError) {
                 await handleScrape(lead.id, lead.website);
             }
@@ -244,21 +403,36 @@ const App: React.FC = () => {
         setIsScrapingAll(false);
     };
 
+    // Increases the number of visible leads for pagination.
     const handleLoadMore = () => {
         setVisibleLeadsCount(prevCount => prevCount + RESULTS_PER_PAGE);
     };
-
+    
+    // Reruns a search from the history tab.
     const handleRerunSearch = (query: string) => {
         setActiveTab('current');
         setSearchQuery(query);
         handleSearch(query);
     };
 
+    // Clears the search history.
     const handleClearHistory = () => {
         updateSearchHistory([]);
     };
 
+    // Handles selecting a business card, syncing the map and list.
+    const handleSelectBusiness = (id: string) => {
+        // Toggle selection off if the same card is clicked again.
+        setSelectedBusinessId(prevId => prevId === id ? null : id);
+        
+        // Auto-scroll logic: if the selected business is outside the visible area, "load more" until it's visible.
+        const selectedIndex = leads.findIndex(lead => lead.id === id);
+        if (selectedIndex >= visibleLeadsCount) {
+             setVisibleLeadsCount(selectedIndex + 1);
+        }
+    };
 
+    // --- RENDER ---
     return (
         <div className="min-h-screen bg-gray-100">
             <Header onExport={handleExportAll} />
@@ -266,6 +440,7 @@ const App: React.FC = () => {
                 <div className="space-y-8">
                     <SearchBar query={searchQuery} setQuery={setSearchQuery} onSubmit={() => handleSearch(searchQuery)} isLoading={isLoading} />
                     
+                    {/* Tab Navigation */}
                     <div className="border-b border-gray-200">
                         <nav className="-mb-px flex space-x-8" aria-label="Tabs">
                             <button onClick={() => setActiveTab('current')} className={`${activeTab === 'current' ? 'border-indigo-500 text-indigo-600' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'} whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm`}>
@@ -277,11 +452,18 @@ const App: React.FC = () => {
                         </nav>
                     </div>
 
+                    {/* Conditional rendering based on active tab */}
                     {activeTab === 'current' && (
                         <div className="space-y-8">
                             <div className="bg-white p-6 rounded-lg border border-gray-200 shadow-sm">
                                 <h2 className="text-lg font-semibold text-gray-700 mb-4">Map View</h2>
-                                <MapView leads={leads} userLocation={userLocation} />
+                                <MapView 
+                                    leads={leads} 
+                                    userLocation={userLocation}
+                                    selectedBusinessId={selectedBusinessId}
+                                    onMarkerClick={handleSelectBusiness}
+                                    isLoading={isLoading}
+                                />
                             </div>
 
                             <div className="bg-white p-6 rounded-lg border border-gray-200 shadow-sm">
@@ -300,7 +482,13 @@ const App: React.FC = () => {
                                 <div className="space-y-4">
                                     {!isLoading && leads.length === 0 && !error && <div className="text-center py-10 text-gray-500">Search to see results here.</div>}
                                     {leads.slice(0, visibleLeadsCount).map(business => (
-                                        <ResultCard key={business.id} business={business} onScrape={handleScrape} />
+                                        <ResultCard 
+                                            key={business.id} 
+                                            business={business} 
+                                            onScrape={handleScrape} 
+                                            isSelected={business.id === selectedBusinessId}
+                                            onSelect={handleSelectBusiness}
+                                        />
                                     ))}
                                 </div>
 
@@ -330,6 +518,7 @@ const App: React.FC = () => {
                                          <li key={item.id} className="py-3 flex justify-between items-center">
                                              <div>
                                                  <p className="font-medium text-gray-800">{item.query}</p>
+
                                                  <p className="text-sm text-gray-500">
                                                      {new Date(item.timestamp).toLocaleString()} - {item.resultCount} results
                                                  </p>
